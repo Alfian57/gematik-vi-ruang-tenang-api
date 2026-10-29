@@ -1,0 +1,62 @@
+# AGENTS.md — Ruang Tenang API
+Dokumen ini adalah instruksi kanonis untuk AI agent dan contributor. Baca README.md, lalu buka context/ sesuai area perubahan.
+
+CLAUDE.md, GEMINI.md, dan .github/copilot-instructions.md adalah adapter tipis yang merujuk ke dokumen ini; Cursor dan OpenCode memakai AGENTS.md sebagai instruction native.
+
+## Sumber kebenaran
+
+- Runtime truth: go.mod, internal/config/config.go, kode feature, router, migration aktif, Dockerfile, entrypoint, dan workflow CI.
+- HTTP route truth: internal/router/router_api_v1_routes.go serta anotasi Swagger pada handler.
+- Data truth: SQL migration; model/seed tidak boleh menggantikan migration.
+- Contract truth: response/DTO aktual dan docs/openapi.yaml yang diregenerasi dari anotasi.
+- Prompt truth: file di prompts/; jangan menanam prompt baru tersebar di service.
+- File .orig, .rej, docs/docs.go, dan Swagger output adalah artefak/histori sesuai generatornya.
+
+## Cara bekerja
+
+1. Baca context domain yang relevan sebelum mengubah feature.
+2. Ikuti alur route → middleware → interface/http handler → application service → repository/infrastructure.
+3. Pertahankan role checks, ownership checks, validation, rate limit, audit, dan privacy boundary.
+4. Endpoint baru/perubahan response harus memiliki DTO, anotasi Swagger, test bermakna, dan pembaruan snapshot OpenAPI.
+5. Migration baru harus incremental, memiliki file up/down, aman untuk deployment berurutan, dan tidak mengubah migration historis.
+6. Jangan mengedit database production, menghapus data, menjalankan migrate-fresh, atau menjalankan seeder reset tanpa instruksi eksplisit.
+7. Jangan menaruh secret, token, data kesehatan mental, atau kredensial demo production di kode/log/dokumen.
+8. Gunakan error/response helper dan query utility yang sudah ada; jangan membuat envelope baru tanpa contract terdokumentasi.
+
+## Validasi
+
+- **Dilarang keras menjalankan testing atau validasi otomatis setelah selesai menyelesaikan tugas**.
+  AI Agent tidak boleh langsung mengeksekusi perintah testing (seperti `go test`, `make test`, `make swagger-check`, `go vet`, `golangci-lint`, atau build) begitu pengeditan kode selesai.
+- **Wajib meminta konfirmasi pengguna terlebih dahulu**: Setelah selesai melakukan perubahan kode, jelaskan perubahan yang dilakukan dan usulkan perintah pengujian yang relevan untuk dijalankan (misalnya package test yang terdampak), lalu tunggu konfirmasi eksplisit dari pengguna sebelum mengeksekusinya.
+- Perubahan route/DTO: review diff OpenAPI atau tanyakan apakah pengguna ingin menjalankan `make swagger` / `make swagger-check`.
+- Perubahan migration: jelaskan rencana verifikasi database disposable dan tunggu konfirmasi sebelum dijalankan.
+- Sebelum menyelesaikan giliran, gunakan pemeriksaan pasif seperti `git diff --check`.
+- Jika dependency, MySQL, atau tool tidak tersedia, laporkan error sebenarnya dan command yang belum terverifikasi.
+
+## Generated files dan operasi
+
+- Sumber Swagger adalah anotasi; gunakan make swagger, bukan edit manual docs/docs.go/docs/openapi.yaml.
+- go mod tidy dapat mengubah go.mod/go.sum; jalankan hanya ketika dependency memang berubah.
+- Entrypoint mendukung RUN_MIGRATE, RUN_MIGRATE_FRESH, dan RUN_SEEDER; fresh migration destruktif.
+- PORT adalah konfigurasi port.
+- MIGRATIONS_PATH mengubah lokasi source migration pada command migrate/container.
+
+## Dokumentasi dan koordinasi
+
+- Perbarui README/context/.env.example ketika feature, route, config, migration, seed, AI model, deployment, atau contract berubah.
+- Perubahan API wajib dicek terhadap web service/schema dan mobile datasource/model.
+- Context harus menjelaskan keputusan/invariant, bukan menyalin seluruh source.
+- Jangan mengubah route atau schema hanya untuk membuat docs tampak konsisten; tandai discrepancy sebagai issue teknis terpisah.
+
+## Privacy dan fitur AI
+
+- Perlakukan journal, chat/context AI, mood, profil, laporan moderasi, dan billing sebagai data pribadi; response publik harus memakai projection yang memang boleh dibagikan.
+- API menjadi otoritas untuk auth, role, ownership, kuota, moderation, serta safety fallback. Jangan mengandalkan client untuk menegakkan boundary tersebut.
+- Prompt dan konfigurasi model tersentral di `prompts/` dan konfigurasi AI API. API menyimpan state penerimaan disclaimer; client saat ini menjaga gate UI chat. Jangan menganggap gate UI sebagai kontrol akses server. Perubahan AI harus menjaga disclaimer, consent boundary, privacy-safe access logging, moderation, quota atomik, dan fallback.
+- Client web/mobile hanya mengonsumsi capability melalui contract. Sinkronkan perubahan yang terlihat client dengan service/schema web serta datasource/model mobile.
+
+## Code review rules
+
+- Flag endpoint terlindungi yang kehilangan AuthMiddleware/UserMiddleware/AdminMiddleware/MitraMiddleware.
+- Flag akses journal/chat/profile tanpa ownership/privacy enforcement.
+- Flag migration destruktif, secret yang di-log, webhook tanpa verifikasi, dan response envelope yang tidak terdokumentasi.

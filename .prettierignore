@@ -1,0 +1,11 @@
+bin
+app-main
+app-migrate
+app-seeder
+uploads
+*.zip
+*.out
+docs/docs.go
+docs/swagger.json
+docs/swagger.yaml
+vendor

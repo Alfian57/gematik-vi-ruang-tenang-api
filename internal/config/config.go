@@ -1,0 +1,163 @@
+package config
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/joho/godotenv"
+	"github.com/spf13/viper"
+)
+
+type Config struct {
+	AppEnv                 string   `mapstructure:"APP_ENV"`
+	Port                   string   `mapstructure:"PORT"`
+	AppTimezone            string   `mapstructure:"APP_TIMEZONE"`
+	DatabaseURL            string   `mapstructure:"DATABASE_URL"`
+	JWTSecret              string   `mapstructure:"JWT_SECRET"`
+	JWTExpiryHours         int      `mapstructure:"JWT_EXPIRY_HOURS"`
+	CORSAllowedOrigins     []string // parsed from CORS_ALLOWED_ORIGINS (comma-separated)
+	DeepSeekAPIKey         string   `mapstructure:"DEEPSEEK_API_KEY"`
+	AI                     AIConfig // centralized AI/model configuration
+	DuitkuSandbox          bool     `mapstructure:"DUITKU_SANDBOX"`
+	DuitkuMerchantCode     string   `mapstructure:"DUITKU_MERCHANT_CODE"`
+	DuitkuAPIKey           string   `mapstructure:"DUITKU_API_KEY"`
+	APIPublicURL           string   `mapstructure:"API_PUBLIC_URL"`
+	FrontendURL            string   `mapstructure:"FRONTEND_URL"`
+	FonnteToken            string   `mapstructure:"FONNTE_TOKEN"`
+	ChatDailyMessageLimit  int      `mapstructure:"CHAT_DAILY_MESSAGE_LIMIT"`
+	ChatQuotaResetInterval string   `mapstructure:"CHAT_QUOTA_RESET_INTERVAL"`
+	VAPIDPublicKey         string   `mapstructure:"VAPID_PUBLIC_KEY"`
+	VAPIDPrivateKey        string   `mapstructure:"VAPID_PRIVATE_KEY"`
+	VAPIDContact           string   `mapstructure:"VAPID_CONTACT"`
+}
+
+var AppConfig *Config
+
+// AIConfig memusatkan konfigurasi model AI agar mudah diganti dari satu tempat.
+// Tiap area fitur punya model sendiri sehingga bisa diatur terpisah lewat
+// environment variable, namun semuanya berbagi API key dan endpoint yang sama.
+type AIConfig struct {
+	APIKey  string `mapstructure:"DEEPSEEK_API_KEY"`
+	BaseURL string `mapstructure:"DEEPSEEK_BASE_URL"`
+	// Model per area fitur. Default diisi di LoadConfig.
+	ChatModel       string `mapstructure:"AI_CHAT_MODEL"`
+	ModerationModel string `mapstructure:"AI_MODERATION_MODEL"`
+	JournalModel    string `mapstructure:"AI_JOURNAL_MODEL"`
+	WellnessModel   string `mapstructure:"AI_WELLNESS_MODEL"`
+}
+
+func LoadConfig() (*Config, error) {
+	// Load .env file (supports .env and fallback to .env.production)
+	_ = godotenv.Load(".env", ".env.production")
+
+	viper.AutomaticEnv()
+
+	// Set defaults for non-critical vars
+	viper.SetDefault("APP_ENV", "development")
+	viper.SetDefault("PORT", "8080")
+	viper.SetDefault("APP_TIMEZONE", "Asia/Jakarta")
+	viper.SetDefault("JWT_EXPIRY_HOURS", 24)
+	viper.SetDefault("CORS_ALLOWED_ORIGINS", "http://localhost:3000")
+	viper.SetDefault("FRONTEND_URL", "")
+	viper.SetDefault("API_PUBLIC_URL", "http://localhost:8080")
+	viper.SetDefault("DUITKU_SANDBOX", true)
+	viper.SetDefault("CHAT_DAILY_MESSAGE_LIMIT", 100)
+	viper.SetDefault("CHAT_QUOTA_RESET_INTERVAL", "24h")
+	viper.SetDefault("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+
+	// AI/model defaults — ganti di sini (atau lewat env) untuk mengubah model
+	// yang dipakai tiap area fitur tanpa menyentuh kode service.
+	viper.SetDefault("AI_CHAT_MODEL", "deepseek-flash")
+	viper.SetDefault("AI_MODERATION_MODEL", "deepseek-flash")
+	viper.SetDefault("AI_JOURNAL_MODEL", "deepseek-flash")
+	viper.SetDefault("AI_WELLNESS_MODEL", "deepseek-flash")
+
+	if err := viper.ReadInConfig(); err != nil {
+		// It's okay if .env doesn't exist, we can read from env vars
+	}
+
+	databaseURL := strings.TrimSpace(viper.GetString("DATABASE_URL"))
+
+	// Fail fast: validate required env vars
+	required := []string{"APP_ENV", "PORT", "JWT_SECRET", "CORS_ALLOWED_ORIGINS"}
+	var missing []string
+	for _, key := range required {
+		if viper.GetString(key) == "" {
+			missing = append(missing, key)
+		}
+	}
+	if databaseURL == "" {
+		missing = append(missing, "DATABASE_URL")
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("missing required env vars: %s", strings.Join(missing, ", "))
+	}
+
+	// Parse CORS origins from comma-separated list + optional frontend URL.
+	origins := parseAllowedOrigins(
+		viper.GetString("CORS_ALLOWED_ORIGINS"),
+		viper.GetString("FRONTEND_URL"),
+	)
+
+	config := &Config{
+		AppEnv:             viper.GetString("APP_ENV"),
+		Port:               viper.GetString("PORT"),
+		AppTimezone:        viper.GetString("APP_TIMEZONE"),
+		DatabaseURL:        databaseURL,
+		JWTSecret:          viper.GetString("JWT_SECRET"),
+		JWTExpiryHours:     viper.GetInt("JWT_EXPIRY_HOURS"),
+		CORSAllowedOrigins: origins,
+		DeepSeekAPIKey:     viper.GetString("DEEPSEEK_API_KEY"),
+		AI: AIConfig{
+			APIKey:          viper.GetString("DEEPSEEK_API_KEY"),
+			BaseURL:         viper.GetString("DEEPSEEK_BASE_URL"),
+			ChatModel:       viper.GetString("AI_CHAT_MODEL"),
+			ModerationModel: viper.GetString("AI_MODERATION_MODEL"),
+			JournalModel:    viper.GetString("AI_JOURNAL_MODEL"),
+			WellnessModel:   viper.GetString("AI_WELLNESS_MODEL"),
+		},
+		DuitkuSandbox:          viper.GetBool("DUITKU_SANDBOX"),
+		DuitkuMerchantCode:     viper.GetString("DUITKU_MERCHANT_CODE"),
+		DuitkuAPIKey:           viper.GetString("DUITKU_API_KEY"),
+		APIPublicURL:           strings.TrimRight(viper.GetString("API_PUBLIC_URL"), "/"),
+		FrontendURL:            strings.TrimRight(viper.GetString("FRONTEND_URL"), "/"),
+		FonnteToken:            viper.GetString("FONNTE_TOKEN"),
+		ChatDailyMessageLimit:  viper.GetInt("CHAT_DAILY_MESSAGE_LIMIT"),
+		ChatQuotaResetInterval: viper.GetString("CHAT_QUOTA_RESET_INTERVAL"),
+		VAPIDPublicKey:         viper.GetString("VAPID_PUBLIC_KEY"),
+		VAPIDPrivateKey:        viper.GetString("VAPID_PRIVATE_KEY"),
+		VAPIDContact:           viper.GetString("VAPID_CONTACT"),
+	}
+
+	AppConfig = config
+	return config, nil
+}
+
+func parseAllowedOrigins(rawOrigins, frontendURL string) []string {
+	origins := make([]string, 0, 4)
+	seen := make(map[string]struct{})
+
+	addOrigin := func(origin string) {
+		normalized := normalizeOrigin(origin)
+		if normalized == "" {
+			return
+		}
+		if _, exists := seen[normalized]; exists {
+			return
+		}
+		seen[normalized] = struct{}{}
+		origins = append(origins, normalized)
+	}
+
+	for _, o := range strings.Split(rawOrigins, ",") {
+		addOrigin(o)
+	}
+	addOrigin(frontendURL)
+
+	return origins
+}
+
+func normalizeOrigin(origin string) string {
+	trimmed := strings.TrimSpace(origin)
+	return strings.TrimRight(trimmed, "/")
+}

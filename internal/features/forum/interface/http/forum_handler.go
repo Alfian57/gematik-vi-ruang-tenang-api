@@ -1,0 +1,748 @@
+package handler
+
+import (
+	"errors"
+	"net/http"
+	"strconv"
+
+	dailytaskapp "github.com/Alfian57/ruang-tenang-api/internal/features/daily_task/application"
+
+	"github.com/Alfian57/ruang-tenang-api/internal/dto"
+	"github.com/Alfian57/ruang-tenang-api/internal/model"
+	"github.com/Alfian57/ruang-tenang-api/pkg/logger"
+	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
+
+	"github.com/Alfian57/ruang-tenang-api/internal/features/forum/application"
+)
+
+type ForumHandler struct {
+	service          application.ForumService
+	dailyTaskService dailytaskapp.DailyTaskService
+}
+
+func NewForumHandler(service application.ForumService) *ForumHandler {
+	return &ForumHandler{service: service}
+}
+
+// SetDailyTaskService sets the daily task service for progress tracking
+func (h *ForumHandler) SetDailyTaskService(dailyTaskService dailytaskapp.DailyTaskService) {
+	h.dailyTaskService = dailyTaskService
+}
+
+func (h *ForumHandler) requireUserID(c *gin.Context) (uint, bool) {
+	rawUserID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return 0, false
+	}
+
+	userID, ok := rawUserID.(uint)
+	if !ok || userID == 0 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return 0, false
+	}
+
+	return userID, true
+}
+
+func (h *ForumHandler) parseUintPathParam(c *gin.Context, key string) (uint, bool) {
+	value, err := strconv.ParseUint(c.Param(key), 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid ID"})
+		return 0, false
+	}
+
+	return uint(value), true
+}
+
+func (h *ForumHandler) bindJSON(c *gin.Context, target interface{}) bool {
+	if err := c.ShouldBindJSON(target); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return false
+	}
+
+	return true
+}
+
+func (h *ForumHandler) parseLimitOffset(c *gin.Context, defaultLimit int) (int, int) {
+	limit, err := strconv.Atoi(c.DefaultQuery("limit", strconv.Itoa(defaultLimit)))
+	if err != nil || limit <= 0 {
+		limit = defaultLimit
+	}
+	if limit > 50 {
+		limit = 50
+	}
+
+	offset, err := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	if err != nil || offset < 0 {
+		offset = 0
+	}
+
+	return limit, offset
+}
+
+// @Summary Create a new forum topic
+// @Description Create a new forum topic
+// @Tags forum
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param request body object{title=string,content=string,category_id=int} true "Forum request"
+// @Success 201 {object} map[string]interface{}
+// @Failure 400 {object} map[string]string
+// @Failure 500 {object} map[string]string
+// @Router /forums [post]
+func (h *ForumHandler) CreateForum(c *gin.Context) {
+	ctx := c.Request.Context()
+	userID, ok := h.requireUserID(c)
+	if !ok {
+		return
+	}
+
+	var req struct {
+		Title      string `json:"title" binding:"required"`
+		Content    string `json:"content"`
+		CategoryID *uint  `json:"category_id"`
+	}
+
+	if !h.bindJSON(c, &req) {
+		return
+	}
+
+	forum, err := h.service.CreateForum(ctx, userID, req.Title, req.Content, req.CategoryID)
+	if err != nil {
+		if errors.Is(err, application.ErrForumBlocked) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Akses forum kamu sedang diblokir oleh admin"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, dto.SuccessResponse(forum, "Forum berhasil dibuat"))
+}
+
+// @Summary Get list of forums
+// @Description Get list of forums with pagination and filters
+// @Tags forum
+// @Accept json
+// @Produce json
+// @Param limit query int false "Limit"
+// @Param offset query int false "Offset"
+// @Param search query string false "Search term"
+// @Param category_id query int false "Category ID"
+// @Param circle query string false "Support circle: tekanan_akademik, relasi_pertemanan, regulasi_emosi, pemulihan_burnout"
+// @Success 200 {object} map[string]interface{}
+// @Failure 500 {object} map[string]string
+// @Router /forums [get]
+func (h *ForumHandler) GetForums(c *gin.Context) {
+	ctx := c.Request.Context()
+	limit, offset := h.parseLimitOffset(c, 10)
+	search := c.Query("search")
+	circle := c.Query("circle")
+	if circle != "" && circle != "tekanan_akademik" && circle != "relasi_pertemanan" && circle != "regulasi_emosi" && circle != "pemulihan_burnout" {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse("Invalid support circle"))
+		return
+	}
+
+	var categoryID *uint
+	if catStr := c.Query("category_id"); catStr != "" {
+		value, err := strconv.ParseUint(catStr, 10, 32)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid category ID"})
+			return
+		}
+		uid := uint(value)
+		categoryID = &uid
+	}
+
+	forums, total, err := h.service.GetForumsByCircle(ctx, limit, offset, search, categoryID, circle)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	page := offset/limit + 1
+	c.JSON(http.StatusOK, dto.NewPaginatedResponse(forums, page, limit, total))
+}
+
+// @Summary Get forum details
+// @Description Get details of a specific forum
+// @Tags forum
+// @Accept json
+// @Produce json
+// @Param slug path string true "Forum Slug"
+// @Success 200 {object} model.Forum
+// @Failure 404 {object} map[string]string
+// @Failure 500 {object} map[string]string
+// @Router /forums/{slug} [get]
+func (h *ForumHandler) GetForumByID(c *gin.Context) {
+	ctx := c.Request.Context()
+	userID, ok := h.requireUserID(c)
+	if !ok {
+		return
+	}
+
+	slug := c.Param("slug")
+	forum, err := h.service.GetForumBySlug(ctx, userID, slug)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Forum not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, dto.SuccessResponse(forum, ""))
+}
+
+// @Summary Delete a forum
+// @Description Delete a forum (Owner or Admin only)
+// @Tags forum
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param slug path string true "Forum Slug"
+// @Success 200 {object} map[string]interface{}
+// @Failure 403 {object} map[string]string
+// @Failure 404 {object} map[string]string
+// @Failure 500 {object} map[string]string
+// @Router /forums/{slug} [delete]
+func (h *ForumHandler) DeleteForum(c *gin.Context) {
+	ctx := c.Request.Context()
+	userID, ok := h.requireUserID(c)
+	if !ok {
+		return
+	}
+
+	userRole := c.GetString("user_role")
+	slug := c.Param("slug")
+
+	if err := h.service.DeleteForumBySlug(ctx, userID, userRole, slug); err != nil {
+		if err.Error() == "Akses ditolak" || err.Error() == "unauthorized" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Anda tidak memiliki izin untuk menghapus forum ini"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, dto.SuccessResponse(nil, "Forum berhasil dihapus"))
+}
+
+// @Summary Create a forum post (reply)
+// @Description Create a reply to a forum topic
+// @Tags forum
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param slug path string true "Forum Slug"
+// @Param request body object{content=string} true "Post request"
+// @Success 201 {object} map[string]interface{}
+// @Failure 400 {object} map[string]string
+// @Failure 500 {object} map[string]string
+// @Router /forums/{slug} [post]
+func (h *ForumHandler) CreateForumPost(c *gin.Context) {
+	ctx := c.Request.Context()
+	userID, ok := h.requireUserID(c)
+	if !ok {
+		return
+	}
+
+	forumSlug := c.Param("slug")
+	var req struct {
+		Content string `json:"content" binding:"required"`
+	}
+
+	if !h.bindJSON(c, &req) {
+		return
+	}
+
+	if err := h.service.CreateForumPostBySlug(ctx, userID, forumSlug, req.Content); err != nil {
+		if errors.Is(err, application.ErrForumBlocked) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Akses forum kamu sedang diblokir oleh admin"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Update daily task progress for commenting in forum
+	if h.dailyTaskService != nil {
+		if err := h.dailyTaskService.UpdateTaskProgress(ctx, userID, model.TaskTypeCommentForum); err != nil {
+			logger.Warn("failed to update daily task progress for forum comment",
+				zap.Uint("user_id", userID), zap.Error(err))
+		}
+	}
+
+	c.JSON(http.StatusCreated, dto.SuccessResponse(nil, "Postingan berhasil dibuat"))
+}
+
+// @Summary Get forum posts
+// @Description Get replies for a forum topic with sorting options
+// @Tags forum
+// @Accept json
+// @Produce json
+// @Param slug path string true "Forum Slug"
+// @Param limit query int false "Limit"
+// @Param offset query int false "Offset"
+// @Param sort query string false "Sort by: top, newest, oldest" default(top)
+// @Success 200 {object} map[string]interface{}
+// @Failure 500 {object} map[string]string
+// @Router /forums/{slug}/posts [get]
+func (h *ForumHandler) GetForumPosts(c *gin.Context) {
+	ctx := c.Request.Context()
+	userID, ok := h.requireUserID(c)
+	if !ok {
+		return
+	}
+
+	forumSlug := c.Param("slug")
+	limit, offset := h.parseLimitOffset(c, 20)
+	sort := c.DefaultQuery("sort", "top")
+
+	posts, total, err := h.service.GetForumPostsSortedBySlug(ctx, forumSlug, limit, offset, sort, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	page := offset/limit + 1
+	c.JSON(http.StatusOK, dto.NewPaginatedResponse(posts, page, limit, total))
+}
+
+// @Summary Delete a forum post
+// @Description Delete a forum post (Owner or Admin only)
+// @Tags forum
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param id path int true "Post ID"
+// @Success 200 {object} map[string]interface{}
+// @Failure 403 {object} map[string]string
+// @Failure 404 {object} map[string]string
+// @Failure 500 {object} map[string]string
+// @Router /posts/{id} [delete]
+func (h *ForumHandler) DeleteForumPost(c *gin.Context) {
+	ctx := c.Request.Context()
+	userID, ok := h.requireUserID(c)
+	if !ok {
+		return
+	}
+
+	userRole := c.GetString("user_role")
+	postID, ok := h.parseUintPathParam(c, "id")
+	if !ok {
+		return
+	}
+
+	if err := h.service.DeleteForumPost(ctx, userID, userRole, postID); err != nil {
+		if err.Error() == "Akses ditolak" || err.Error() == "unauthorized" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Anda tidak memiliki izin untuk menghapus postingan ini"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, dto.SuccessResponse(nil, "Postingan berhasil dihapus"))
+}
+
+// @Summary Toggle forum like
+// @Description Like or unlike a forum
+// @Tags forum
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param slug path string true "Forum Slug"
+// @Success 200 {object} map[string]interface{}
+// @Failure 500 {object} map[string]string
+// @Router /forums/{slug}/like [put]
+func (h *ForumHandler) ToggleLike(c *gin.Context) {
+	ctx := c.Request.Context()
+	userID, ok := h.requireUserID(c)
+	if !ok {
+		return
+	}
+
+	forumSlug := c.Param("slug")
+
+	liked, err := h.service.ToggleLikeBySlug(ctx, userID, forumSlug)
+	if err != nil {
+		if errors.Is(err, application.ErrForumBlocked) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Akses forum kamu sedang diblokir oleh admin"})
+			return
+		}
+		if errors.Is(err, application.ErrCannotLikeOwnForum) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	message := "Forum disukai"
+	if !liked {
+		message = "Batal menyukai forum"
+	}
+
+	c.JSON(http.StatusOK, dto.SuccessResponse(gin.H{"liked": liked}, message))
+}
+
+// ==================== Post Voting Handlers ====================
+
+// @Summary Upvote a forum post
+// @Description Upvote a forum post/answer
+// @Tags forum
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param id path int true "Post ID"
+// @Success 200 {object} map[string]interface{}
+// @Failure 400 {object} map[string]string
+// @Failure 500 {object} map[string]string
+// @Router /posts/{id}/upvote [put]
+func (h *ForumHandler) UpvotePost(c *gin.Context) {
+	ctx := c.Request.Context()
+	userID, ok := h.requireUserID(c)
+	if !ok {
+		return
+	}
+
+	postID, ok := h.parseUintPathParam(c, "id")
+	if !ok {
+		return
+	}
+
+	if err := h.service.VotePost(ctx, userID, postID, "upvote"); err != nil {
+		if errors.Is(err, application.ErrForumBlocked) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Akses forum kamu sedang diblokir oleh admin"})
+			return
+		}
+		if errors.Is(err, application.ErrCannotVoteOwnPost) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, dto.SuccessResponse(gin.H{"voted": true}, "Berhasil memberikan upvote"))
+}
+
+// @Summary Downvote a forum post
+// @Description Downvote a forum post/answer (if enabled)
+// @Tags forum
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param id path int true "Post ID"
+// @Success 200 {object} map[string]interface{}
+// @Failure 400 {object} map[string]string
+// @Failure 500 {object} map[string]string
+// @Router /posts/{id}/downvote [put]
+func (h *ForumHandler) DownvotePost(c *gin.Context) {
+	ctx := c.Request.Context()
+	userID, ok := h.requireUserID(c)
+	if !ok {
+		return
+	}
+
+	postID, ok := h.parseUintPathParam(c, "id")
+	if !ok {
+		return
+	}
+
+	if err := h.service.VotePost(ctx, userID, postID, "downvote"); err != nil {
+		if errors.Is(err, application.ErrForumBlocked) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Akses forum kamu sedang diblokir oleh admin"})
+			return
+		}
+		if errors.Is(err, application.ErrCannotVoteOwnPost) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, dto.SuccessResponse(gin.H{"voted": true}, "Berhasil memberikan downvote"))
+}
+
+// @Summary Remove vote from a forum post
+// @Description Remove user's vote from a forum post
+// @Tags forum
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param id path int true "Post ID"
+// @Success 200 {object} map[string]interface{}
+// @Failure 400 {object} map[string]string
+// @Failure 500 {object} map[string]string
+// @Router /posts/{id}/vote [delete]
+func (h *ForumHandler) RemovePostVote(c *gin.Context) {
+	ctx := c.Request.Context()
+	userID, ok := h.requireUserID(c)
+	if !ok {
+		return
+	}
+
+	postID, ok := h.parseUintPathParam(c, "id")
+	if !ok {
+		return
+	}
+
+	if err := h.service.RemovePostVote(ctx, userID, postID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, dto.SuccessResponse(gin.H{"voted": false}, "Vote berhasil dibatalkan"))
+}
+
+// ==================== Best Answer Handlers ====================
+
+// @Summary Mark post as accepted answer
+// @Description Mark a forum post as the accepted answer (OP only)
+// @Tags forum
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param id path int true "Post ID"
+// @Success 200 {object} map[string]interface{}
+// @Failure 400 {object} map[string]string
+// @Failure 403 {object} map[string]string
+// @Failure 500 {object} map[string]string
+// @Router /posts/{id}/accept [put]
+func (h *ForumHandler) MarkAcceptedAnswer(c *gin.Context) {
+	ctx := c.Request.Context()
+	userID, ok := h.requireUserID(c)
+	if !ok {
+		return
+	}
+
+	userRole := c.GetString("user_role")
+	postID, ok := h.parseUintPathParam(c, "id")
+	if !ok {
+		return
+	}
+
+	if err := h.service.MarkAsAcceptedAnswer(ctx, userID, userRole, postID); err != nil {
+		if err.Error() == "Hanya pembuat utas atau admin yang dapat menandai jawaban" ||
+			err.Error() == "Tidak dapat menandai jawaban Anda sendiri sebagai jawaban yang diterima" ||
+			err.Error() == "only the thread creator can mark an accepted answer" ||
+			err.Error() == "cannot mark your own answer as accepted" {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, dto.SuccessResponse(nil, "Jawaban berhasil ditandai sebagai yang diterima"))
+}
+
+// @Summary Unmark accepted answer for a forum
+// @Description Remove the accepted answer mark from a forum (OP only)
+// @Tags forum
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param slug path string true "Forum Slug"
+// @Success 200 {object} map[string]interface{}
+// @Failure 403 {object} map[string]string
+// @Failure 500 {object} map[string]string
+// @Router /forums/{slug}/accepted-answer [delete]
+func (h *ForumHandler) UnmarkAcceptedAnswer(c *gin.Context) {
+	ctx := c.Request.Context()
+	userID, ok := h.requireUserID(c)
+	if !ok {
+		return
+	}
+
+	userRole := c.GetString("user_role")
+	forumSlug := c.Param("slug")
+
+	if err := h.service.UnmarkAcceptedAnswerBySlug(ctx, userID, userRole, forumSlug); err != nil {
+		if err.Error() == "Hanya pembuat utas atau admin yang dapat membatalkan tanda jawaban" ||
+			err.Error() == "only the thread creator can unmark an accepted answer" {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, dto.SuccessResponse(nil, "Tanda jawaban yang diterima berhasil dibatalkan"))
+}
+
+// @Summary Get accepted answer for a forum
+// @Description Get the accepted answer for a forum topic
+// @Tags forum
+// @Accept json
+// @Produce json
+// @Param slug path string true "Forum Slug"
+// @Success 200 {object} model.ForumPost
+// @Failure 404 {object} map[string]string
+// @Failure 500 {object} map[string]string
+// @Router /forums/{slug}/accepted-answer [get]
+func (h *ForumHandler) GetAcceptedAnswer(c *gin.Context) {
+	ctx := c.Request.Context()
+	forumSlug := c.Param("slug")
+
+	post, err := h.service.GetAcceptedAnswerBySlug(ctx, forumSlug)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	if post == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Jawaban yang diterima tidak ditemukan"})
+		return
+	}
+
+	c.JSON(http.StatusOK, dto.SuccessResponse(post, ""))
+}
+
+// ==================== Report Handlers ====================
+
+// @Summary Report a forum post
+// @Description Report a forum post for moderation
+// @Tags forum
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param id path int true "Post ID"
+// @Param request body object{reason=string,description=string} true "Report request"
+// @Success 201 {object} map[string]interface{}
+// @Failure 400 {object} map[string]string
+// @Failure 500 {object} map[string]string
+// @Router /posts/{id}/report [post]
+func (h *ForumHandler) ReportPost(c *gin.Context) {
+	ctx := c.Request.Context()
+	userID, ok := h.requireUserID(c)
+	if !ok {
+		return
+	}
+
+	postID, ok := h.parseUintPathParam(c, "id")
+	if !ok {
+		return
+	}
+
+	var req struct {
+		Reason      string `json:"reason" binding:"required"`
+		Description string `json:"description"`
+	}
+
+	if !h.bindJSON(c, &req) {
+		return
+	}
+
+	if err := h.service.ReportPost(ctx, userID, postID, req.Reason, req.Description); err != nil {
+		if err.Error() == "Alasan laporan tidak valid" ||
+			err.Error() == "Tidak dapat melaporkan postingan Anda sendiri" ||
+			err.Error() == "Anda sudah pernah melaporkan postingan ini" ||
+			err.Error() == "invalid report reason" ||
+			err.Error() == "cannot report your own post" ||
+			err.Error() == "you have already reported this post" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, dto.SuccessResponse(nil, "Postingan berhasil dilaporkan"))
+}
+
+// @Summary Get pending post reports
+// @Description Get all pending post reports for moderation (Admin only)
+// @Tags moderation
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param limit query int false "Limit"
+// @Param offset query int false "Offset"
+// @Success 200 {object} map[string]interface{}
+// @Failure 500 {object} map[string]string
+// @Router /moderation/post-reports [get]
+func (h *ForumHandler) GetPendingPostReports(c *gin.Context) {
+	ctx := c.Request.Context()
+	limit, offset := h.parseLimitOffset(c, 20)
+
+	reports, total, err := h.service.GetPendingPostReports(ctx, limit, offset)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	page := offset/limit + 1
+	c.JSON(http.StatusOK, dto.NewPaginatedResponse(reports, page, limit, total))
+}
+
+// @Summary Review a post report
+// @Description Review and action a post report (Admin only)
+// @Tags moderation
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param id path int true "Report ID"
+// @Param request body object{status=string,notes=string} true "Review request"
+// @Success 200 {object} map[string]interface{}
+// @Failure 400 {object} map[string]string
+// @Failure 500 {object} map[string]string
+// @Router /moderation/post-reports/{id} [put]
+func (h *ForumHandler) ReviewPostReport(c *gin.Context) {
+	ctx := c.Request.Context()
+	reviewerID, ok := h.requireUserID(c)
+	if !ok {
+		return
+	}
+
+	reportID, ok := h.parseUintPathParam(c, "id")
+	if !ok {
+		return
+	}
+
+	var req struct {
+		Status string `json:"status" binding:"required"` // reviewed, dismissed, actioned
+		Notes  string `json:"notes"`
+	}
+
+	if !h.bindJSON(c, &req) {
+		return
+	}
+
+	if err := h.service.ReviewPostReport(ctx, reviewerID, reportID, req.Status, req.Notes); err != nil {
+		if err.Error() == "Status laporan tidak valid" || err.Error() == "invalid report status" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, dto.SuccessResponse(nil, "Laporan berhasil ditinjau"))
+}
+
+// @Summary Get report reasons
+// @Description Get available report reasons for forum posts
+// @Tags forum
+// @Accept json
+// @Produce json
+// @Success 200 {object} map[string]interface{}
+// @Router /forums/report-reasons [get]
+func (h *ForumHandler) GetReportReasons(c *gin.Context) {
+
+	c.JSON(http.StatusOK, dto.SuccessResponse(dto.PostReportReasons(), ""))
+}
+
+// @Summary Get sort options
+// @Description Get available sort options for forum posts
+// @Tags forum
+// @Accept json
+// @Produce json
+// @Success 200 {object} map[string]interface{}
+// @Router /forums/sort-options [get]
+func (h *ForumHandler) GetSortOptions(c *gin.Context) {
+	c.JSON(http.StatusOK, dto.SuccessResponse(dto.GetForumPostSortOptions(), ""))
+}

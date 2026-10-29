@@ -1,0 +1,33 @@
+package gamification
+
+type ActivityType string
+
+const (
+	ActivityChatAI            ActivityType = "chat_ai"
+	ActivityUploadArticle     ActivityType = "upload_article"
+	ActivityForumComment      ActivityType = "forum_comment"
+	ActivityAcceptedAnswer    ActivityType = "accepted_answer"     // OP marks user's answer as accepted
+	ActivityPostUpvoteGiven   ActivityType = "post_upvote_given"   // User receives an upvote
+	ActivityPostUpvoteRemoved ActivityType = "post_upvote_removed" // User loses an upvote (negative)
+	ActivityStoryApproved     ActivityType = "story_approved"      // Story gets approved by moderator
+	ActivityHeartReceived     ActivityType = "heart_received"      // Story author receives a heart
+)
+
+const (
+	ExpChatAI            int64 = 10
+	ExpUploadArticle     int64 = 20
+	ExpForumComment      int64 = 5
+	ExpAcceptedAnswer    int64 = 30 // Bonus for accepted answer
+	ExpPostUpvoteGiven   int64 = 5  // Per upvote received
+	ExpPostUpvoteRemoved int64 = -5 // When upvote is removed (can be negative)
+	ExpStoryApproved     int64 = 50 // Reward for approved story
+	ExpHeartReceived     int64 = 2  // Small reward per heart received
+)
+
+const (
+	LimitChatAI          int = 1  // Per day
+	LimitForumComment    int = 5  // Per day
+	LimitPostUpvoteGiven int = 20 // Max upvotes earning XP per day
+	LimitStoryApproved   int = 3  // Max story approvals earning XP per day
+	LimitHeartReceived   int = 10 // Max hearts earning XP per day
+)
